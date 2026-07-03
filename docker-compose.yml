@@ -1,0 +1,112 @@
+# docker-compose.yml — Sistema self-hosted completo
+# Todo corre en tu equipo. Único costo externo: APIs de IA (claves en .env).
+# Nada se expone a internet salvo las llamadas salientes a las APIs.
+
+services:
+  # ── Capa de datos ──
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: content_factory
+      POSTGRES_USER: factory
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U factory -d content_factory"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7
+    restart: unless-stopped
+    command: redis-server --requirepass ${REDIS_PASSWORD}
+    volumes:
+      - redisdata:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ── Sistema A: Radar de nichos ──
+  radar:
+    build: ./radar
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Sobrescribe los valores de .env para usar hostnames internos de Docker
+      DATABASE_URL: postgresql://factory:${POSTGRES_PASSWORD}@postgres:5432/content_factory
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis:    { condition: service_healthy }
+    volumes:
+      - ./radar:/app
+    command: python -m src.scheduler
+
+  # ── Sistema B: Fábrica de contenido ──
+  # factory-worker: descomentar en Fase 5 (assets + render con RQ)
+  # factory-worker:
+  #   build: ./factory
+  #   restart: unless-stopped
+  #   env_file: .env
+  #   environment:
+  #     DATABASE_URL: postgresql://factory:${POSTGRES_PASSWORD}@postgres:5432/content_factory
+  #     REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+  #   depends_on:
+  #     postgres: { condition: service_healthy }
+  #     redis:    { condition: service_healthy }
+  #   volumes:
+  #     - ./factory:/app
+  #     - media:/data
+  #   command: rq worker video_jobs
+
+  factory-scheduler:
+    build: ./factory
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://factory:${POSTGRES_PASSWORD}@postgres:5432/content_factory
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis:    { condition: service_healthy }
+    volumes:
+      - ./factory:/app
+    command: python -m src.scheduler
+
+  # ── Dashboard de revisión ──
+  # Descomentar cuando exista dashboard/Dockerfile (Fase 6)
+  # dashboard:
+  #   build: ./dashboard
+  #   restart: unless-stopped
+  #   env_file: .env
+  #   environment:
+  #     DATABASE_URL: postgresql://factory:${POSTGRES_PASSWORD}@postgres:5432/content_factory
+  #   depends_on:
+  #     postgres: { condition: service_healthy }
+  #   volumes:
+  #     - ./dashboard:/app
+  #     - media:/data
+  #   ports:
+  #     - "127.0.0.1:8080:8080"
+  #   command: uvicorn dashboard.main:app --host 0.0.0.0 --port 8080
+
+volumes:
+  pgdata:
+  redisdata:
+  media:
+    driver: local
+    # Para apuntar a una ruta específica de tu disco (ej. un disco grande):
+    # driver_opts:
+    #   type: none
+    #   o: bind
+    #   device: /ruta/absoluta/en/tu/disco/media
