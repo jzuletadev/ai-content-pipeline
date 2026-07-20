@@ -26,7 +26,6 @@ def run():
     logger.info("niche_analyzer: start")
 
     _assign_missing_niches()
-    _clear_old_niches()
     channels = _load_channel_metrics()
     logger.info(f"Canales IA confirmados con métricas: {len(channels)}")
 
@@ -43,24 +42,24 @@ def run():
             continue
 
         demand, saturation, opportunity = _compute_scores(ch_list)
+
+        own_boost = _own_performance_boost(niche_name)
+        if own_boost:
+            demand += own_boost
+            opportunity = demand / (saturation + EPSILON)
+
         sample = [
             {"title": c["title"], "subscribers": c["subscribers"]}
             for c in sorted(ch_list, key=lambda x: x["subscribers"], reverse=True)[:5]
         ]
         _insert_niche(niche_name, demand, saturation, opportunity, sample)
+        boost_note = f" (+{own_boost:.1f} por rendimiento propio)" if own_boost else ""
         logger.info(
             f"  {niche_name}: canales={len(ch_list)} "
-            f"demand={demand:.1f} sat={saturation:.1f} opp={opportunity:.4f}"
+            f"demand={demand:.1f}{boost_note} sat={saturation:.1f} opp={opportunity:.4f}"
         )
 
     logger.info("niche_analyzer: done")
-
-
-def _clear_old_niches():
-    with get_conn() as conn:
-        cur = conn.cursor()
-        cur.execute("DELETE FROM niches")
-        logger.info("Niches anteriores eliminados")
 
 
 def _assign_missing_niches():
@@ -158,14 +157,48 @@ def _compute_scores(channels: list[dict]) -> tuple[float, float, float]:
     return round(demand, 2), round(saturation, 2), round(opportunity, 4)
 
 
+def _own_performance_boost(niche_name: str) -> float:
+    """Cierra el loop: si tus propios videos publicados en este nicho rinden bien
+    de verdad (video_results), sumá demanda extra. Sin datos propios, boost = 0."""
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT AVG(vr.views)
+            FROM video_results vr
+            JOIN videos v ON v.id = vr.video_id
+            JOIN active_channels ac ON ac.id = v.active_channel_id
+            JOIN niches n ON n.id = ac.niche_id
+            WHERE n.name = %s
+            """,
+            (niche_name,),
+        )
+        row = cur.fetchone()
+        avg_views = row[0] if row else None
+
+    if not avg_views:
+        return 0.0
+
+    # Cada 10K views propias promedio suma 1 punto de demanda, tope +20.
+    return min(float(avg_views) / 10_000, 20.0)
+
+
 def _insert_niche(name, demand, saturation, opportunity, sample):
+    # Upsert por nombre: mantiene el mismo id de nicho entre corridas (active_channels
+    # lo referencia por FK). Borrar-y-reinsertar rompía esa referencia.
     with get_conn() as conn:
         cur = conn.cursor()
         cur.execute(
             """
             INSERT INTO niches
-                (name, demand_score, saturation_score, opportunity_score, sample_channels)
-            VALUES (%s, %s, %s, %s, %s)
+                (name, demand_score, saturation_score, opportunity_score, sample_channels, computed_at)
+            VALUES (%s, %s, %s, %s, %s, now())
+            ON CONFLICT (name) DO UPDATE SET
+                demand_score      = EXCLUDED.demand_score,
+                saturation_score  = EXCLUDED.saturation_score,
+                opportunity_score = EXCLUDED.opportunity_score,
+                sample_channels   = EXCLUDED.sample_channels,
+                computed_at       = now()
             """,
             (name, demand, saturation, opportunity, json.dumps(sample)),
         )

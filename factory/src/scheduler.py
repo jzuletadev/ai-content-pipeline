@@ -9,7 +9,7 @@ logging.basicConfig(
 )
 
 from apscheduler.schedulers.blocking import BlockingScheduler
-from src import topic_scraper, script_generator
+from src import topic_scraper, script_generator, result_tracker
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +18,7 @@ def run_pipeline():
     logger.info("=== Factory pipeline: start ===")
     topic_scraper.run()
     script_generator.run()
+    result_tracker.run()
     logger.info("=== Factory pipeline: done ===")
 
 

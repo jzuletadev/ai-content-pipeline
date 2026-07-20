@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS observed_videos (
 
 CREATE TABLE IF NOT EXISTS niches (
     id                  BIGSERIAL PRIMARY KEY,
-    name                TEXT NOT NULL,
+    name                TEXT NOT NULL UNIQUE,
     demand_score        NUMERIC,
     saturation_score    NUMERIC,
     opportunity_score   NUMERIC,
@@ -86,7 +86,8 @@ CREATE TABLE IF NOT EXISTS videos (
     render_path         TEXT,
     audio_ref           TEXT,
     created_at          TIMESTAMPTZ DEFAULT now(),
-    published_at        TIMESTAMPTZ
+    published_at        TIMESTAMPTZ,
+    published_url       TEXT   -- URL de YouTube pegada al marcar 'published'; result_tracker la usa para leer métricas
 );
 
 CREATE TABLE IF NOT EXISTS video_results (

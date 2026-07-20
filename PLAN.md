@@ -77,28 +77,25 @@ Marcar cada tarea con `[x]` al completarla.
 **Objetivo:** Detectar temas del día + generar guion completo con Claude.
 
 ### Configuración
-- [ ] `ANTHROPIC_API_KEY` en `.env`
-- [ ] Crear primer registro en `active_channels` (tu canal + nicho elegido tras Fase 3)
+- [x] `ANTHROPIC_API_KEY` en `.env`
+- [x] Crear primer registro en `active_channels` (Nixie Musical, nicho lyric_videos)
+- [x] `LASTFM_API_KEY` (reemplazo de Spotify — Spotify Web API pasó a requerir Premium)
 
 ### Código
-- [ ] `factory/Dockerfile` (Python + Node para Fase 5)
-- [ ] `factory/requirements.txt`
-- [ ] `factory/src/__init__.py`
-- [ ] `factory/src/db.py`
-- [ ] `factory/src/topic_scraper.py`
-  - Detecta temas del día para el nicho activo (RSS, Google Trends, YouTube trending)
-  - Inserta en tabla `topics` con `status = 'pending'`
-- [ ] `factory/src/script_generator.py`
-  - Llama Claude API
-  - Input: topic + style_config del active_channel
-  - Output: guion estructurado (escenas, texto, tiempos) + prompts de imagen + metadata (título, descripción, hashtags)
-  - Guarda en `videos.script`, `videos.metadata`; avanza status a `generating_assets`
-- [ ] `factory/src/scheduler.py` — cron diario
+- [x] `factory/Dockerfile`
+- [x] `factory/requirements.txt`
+- [x] `factory/src/__init__.py`
+- [x] `factory/src/db.py`
+- [x] `factory/src/topic_scraper.py` — Last.fm (trending por país + género) y Wikipedia On This Day
+- [x] `factory/src/script_generator.py` — Claude genera guion + prompts + metadata
+- [x] `factory/src/scheduler.py` — cron diario
 
 ### Verificación
-- [ ] Job de texto corre end-to-end
-- [ ] `SELECT script, metadata FROM videos WHERE status = 'generating_assets' LIMIT 1;`
-- [ ] Guion tiene estructura coherente y metadata lista
+- [x] Job de texto corre end-to-end
+- [x] 4 videos con script generado (Danza Kuduro, Livin' La Vida Loca, Me gustas tú, Chantaje)
+- [x] Guion tiene estructura coherente y metadata lista
+
+**Estado: COMPLETO ✓**
 
 ---
 
@@ -106,29 +103,47 @@ Marcar cada tarea con `[x]` al completarla.
 **Objetivo:** Generar imágenes, voz y ensamblar video completo con Remotion.
 
 ### Configuración
-- [ ] `GOOGLE_API_KEY` en `.env` (Gemini para imágenes)
-- [ ] `ELEVENLABS_API_KEY` en `.env`
-- [ ] Node.js + Remotion instalado en imagen Docker de factory
+- [x] `ELEVENLABS_API_KEY` en `.env`
+- [x] `ELEVENLABS_VOICE_ID` — default configurado en `.env`
+- [x] Node.js + Chromium del sistema instalado en imagen Docker de factory
+- [x] ~~Gemini~~ — descartado: pedía prepago de $25 mínimo, no pago-por-uso real
+- [x] **Pivote a self-hosted:** `imagegen/` — servicio propio, GPU local (RTX 3060)
+- [x] ~~sd-turbo~~ → **SD 1.5 estándar** — sd-turbo (destilado) deformaba anatomía en grupos de personas; SD 1.5 + CFG real + negative prompts lo resuelve. Tiempo no es problema (corre de noche)
+- [x] Formato de lyric videos: canción completa → **30s (Shorts/Reels/TikTok)** — Claude elige el estribillo, no la canción entera
 
 ### Código
-- [ ] `factory/src/asset_generator.py`
-  - Llama Gemini API para generar imágenes de cada escena
-  - Llama ElevenLabs API para generar audio (voz)
+- [x] `factory/src/queue.py` — conexión a la cola RQ `video_jobs`
+- [x] `imagegen/app.py` — FastAPI + diffusers, SD 1.5 + negative prompts, endpoint `POST /generate`
+- [x] `imagegen/Dockerfile` — pre-descarga pesos del modelo en build time
+- [x] `factory/src/asset_generator.py`
+  - Llama `imagegen` (HTTP interno) para generar imágenes de cada escena (idempotente: salta si el archivo ya existe)
+  - Llama ElevenLabs API para narración TTS (solo en nichos narrados; lyric_videos no lleva TTS) — **sin validar end-to-end todavía**, ver nota abajo
   - Guarda paths en `videos.assets`; avanza status a `rendering`
-- [ ] `factory/remotion/src/index.ts` — entry point Remotion
-- [ ] `factory/remotion/src/MainVideo.tsx` — composición base
-  - Lee props del JSON spec (escenas, audio, subtítulos, estilo)
-  - Renderiza secuencias con `Sequence`, `Img`, `Audio`
-- [ ] `factory/src/render_worker.py`
-  - Prepara JSON spec desde `videos.assets` + `videos.script`
-  - Dispara `npx remotion render` como subproceso
+- [x] `factory/remotion/` — proyecto Remotion completo (package.json, Root.tsx, MainVideo.tsx, types.ts)
+  - Ken Burns continuo (zoom+pan durante toda la escena, alternando dirección) + fade a negro en bordes de escena
+  - Animación de texto (fade/slide/zoom) separada del movimiento de la imagen
+- [x] `factory/src/render_worker.py`
+  - Normaliza escenas de ambos nichos a un formato uniforme para Remotion
+  - Copia assets a `remotion/public/`, dispara `npx remotion render` como subproceso
   - Guarda path del MP4 en `videos.render_path`; avanza status a `review`
-- [ ] Actualizar `docker-compose.yml`: descomentar `factory-worker` y `factory-scheduler`
+- [x] `factory/src/jobs.py` + `factory/src/worker.py` — RQ worker que procesa assets+render por video, con reintentos
+- [x] `script_generator.py` ahora encola cada video en `video_jobs` al terminar el guion
+- [x] `docker-compose.yml`: `imagegen` (con reserva de GPU), `factory-worker` (RQ worker), `factory-scheduler`
+- [x] Fix: volumen `factory_node_modules` — el bind mount `./factory:/app` tapaba el `node_modules` de Remotion generado en build
+- [x] Fix: `init: true` en factory-worker/scheduler — Chromium/ffmpeg dejaban zombies sin cosechar (PID 1 no era un init real), colgaba renders sucesivos
 
 ### Verificación
-- [ ] Primer MP4 generado en `/data/renders/`
-- [ ] `SELECT render_path FROM videos WHERE status = 'review';` devuelve path válido
-- [ ] Video se puede reproducir y tiene sentido visual
+- [x] Build de Chromium/Node en factory — pasó sin ajustes
+- [x] GPU passthrough Docker Desktop → contenedor `imagegen` — funcionó sin ajustes, `healthy` al primer intento
+- [x] Pipeline completo validado de punta a punta con contenido real (temas reales de Last.fm → Claude → SD 1.5 → Remotion → `review`)
+- [x] Calidad de imágenes validada — anatomía correcta con SD 1.5 + negative prompts
+- [x] Movimiento/transiciones validadas y aprobadas por el usuario (Ken Burns + fade a negro)
+
+### Pendiente / no validado aún
+- [ ] Nicho `historias_historicas` (o cualquier nicho narrado) — nunca se creó un `active_channel` para probarlo; el path de ElevenLabs/TTS no se ejercitó en esta fase
+- [ ] Videos aprobados manualmente / flujo de publicación real (eso es Fase 6, dashboard)
+
+**Estado: COMPLETO ✓ para lyric_videos — pipeline end-to-end funcionando, generación de imágenes 100% self-hosted ($0/imagen), formato corto validado**
 
 ---
 
@@ -136,28 +151,30 @@ Marcar cada tarea con `[x]` al completarla.
 **Objetivo:** Interfaz para aprobar/rechazar videos y copiar metadata antes de publicar.
 
 ### Código
-- [ ] `dashboard/Dockerfile`
-- [ ] `dashboard/requirements.txt`
-- [ ] `dashboard/src/__init__.py`
-- [ ] `dashboard/src/main.py` — FastAPI app
-  - `GET /videos?status=review` — lista videos en cola
-  - `GET /videos/{id}` — detalle: script, metadata, audio_ref
-  - `POST /videos/{id}/approve` — marca `approved`
-  - `POST /videos/{id}/reject` — marca `rejected`
-  - `POST /videos/{id}/published` — marca `published`, dispara tracking
-- [ ] `dashboard/src/templates/index.html` — lista de videos
-- [ ] `dashboard/src/templates/video.html`
-  - Reproductor del MP4
-  - Título / descripción / hashtags con botón copiar
-  - Para música: nombre del audio nativo + link
-  - Botones aprobar / rechazar / regenerar
-- [ ] Actualizar `docker-compose.yml`: descomentar `dashboard`
+- [x] `dashboard/Dockerfile`
+- [x] `dashboard/requirements.txt`
+- [x] `dashboard/src/__init__.py` + `dashboard/src/db.py`
+- [x] `dashboard/src/main.py` — FastAPI app
+  - `GET /?status=review|approved|rejected|published` — lista videos por estado (tabs)
+  - `GET /videos/{id}` — detalle: reproductor, metadata
+  - `GET /videos/{id}/file` — sirve el MP4 (streaming + descarga)
+  - `POST /videos/{id}/approve` / `/reject` / `/published`
+- [x] `dashboard/src/templates/index.html` — lista de videos con tabs por estado
+- [x] `dashboard/src/templates/video.html`
+  - Reproductor del MP4, título/descripción/hashtags con botón copiar (clipboard API)
+  - Audio nativo a agregar (para lyric videos, ya que el render es mudo)
+  - Botones aprobar / rechazar (en `review`) → descargar / marcar publicado (en `approved`)
+- [x] `docker-compose.yml`: `dashboard` activo, puerto `127.0.0.1:8080`, volumen `media` read-only
 
 ### Verificación
-- [ ] `http://127.0.0.1:8080` carga sin error
-- [ ] Video en estado `review` aparece en la lista
-- [ ] Aprobar cambia status a `approved` en BD
-- [ ] MP4 descargable después de aprobar
+- [x] `http://127.0.0.1:8080` carga sin error (HTTP 200, HTML real con videos)
+- [x] Video en estado `review` aparece en la lista
+- [x] Aprobar cambia status a `approved` en BD (probado por HTTP real)
+- [x] Rechazar cambia a `rejected` (probado)
+- [x] Marcar publicado cambia a `published` + `published_at` (probado)
+- [x] Streaming del MP4 funciona (`/videos/{id}/file` → HTTP 200)
+
+**Estado: COMPLETO ✓**
 
 ---
 
@@ -165,19 +182,23 @@ Marcar cada tarea con `[x]` al completarla.
 **Objetivo:** Métricas post-publicación retroalimentan al radar para refinar scoring.
 
 ### Código
-- [ ] `factory/src/result_tracker.py`
-  - Para cada video con `status = 'published'`, llama YouTube Data API
-  - Lee views, likes, comments del video propio
-  - Inserta en `video_results`
-- [ ] Conectar `video_results` al `niche_analyzer`
-  - El scoring pondera performance real de videos propios
-  - Nichos donde tus videos rinden bien suben en `opportunity_score`
-- [ ] Agregar `result_tracker.run()` al scheduler de factory (diario)
+- [x] Migración: columna `videos.published_url` — sin esto no había forma de saber qué video de YouTube corresponde a cada publicación
+- [x] Dashboard: campo de URL al marcar "publicado" (`POST /videos/{id}/published` con form)
+- [x] `factory/src/result_tracker.py`
+  - Para cada video con `status = 'published'` y `published_url` cargada, llama YouTube Data API
+  - Extrae el ID de YouTube de la URL (soporta watch, shorts, youtu.be)
+  - Lee views, likes, comments del video propio; inserta en `video_results`
+- [x] Conectar `video_results` al `niche_analyzer`
+  - `_own_performance_boost()`: promedia views propias por nicho, suma hasta +20 pts de demanda
+  - Sin datos propios el boost es 0 — no rompe el scoring existente
+- [x] `result_tracker.run()` agregado al `scheduler.py` de factory (diario, después de script_generator)
 
 ### Verificación
-- [ ] `SELECT * FROM video_results ORDER BY captured_at DESC LIMIT 10;`
-- [ ] Después de publicar manualmente y marcar `published`, métricas se capturan solas
-- [ ] `niches.opportunity_score` evoluciona semana a semana con datos reales
+- [ ] `SELECT * FROM video_results ORDER BY captured_at DESC LIMIT 10;` — **vacío hasta que publiques un video real y cargues su URL**
+- [ ] Después de publicar manualmente y marcar `published` con URL real, métricas se capturan solas
+- [ ] `niches.opportunity_score` evoluciona con datos reales — necesita tiempo + publicaciones reales para verse
+
+**Estado: CÓDIGO COMPLETO ✓ — infraestructura lista, sin datos reales todavía (nadie publicó a YouTube aún)**
 
 ---
 
@@ -189,9 +210,9 @@ Marcar cada tarea con `[x]` al completarla.
 | 2    | Radar mínimo              | ✓ Completo    |
 | 3    | Análisis de nichos        | ✓ Completo    |
 | 4    | Fábrica: pipeline texto   | ✓ Completo    |
-| 5    | Fábrica: assets + render  | ○ Pendiente   |
-| 6    | Dashboard                 | ○ Pendiente   |
-| 7    | Loop de analytics         | ○ Pendiente   |
+| 5    | Fábrica: assets + render  | ✓ Completo    |
+| 6    | Dashboard                 | ✓ Completo    |
+| 7    | Loop de analytics         | ✓ Código completo (sin datos reales) |
 
 ---
 
@@ -201,9 +222,9 @@ Marcar cada tarea con `[x]` al completarla.
 |-----|------|-----------------|
 | YouTube Data API v3 | 2, 7 | Google Cloud Console → habilitar API → clave |
 | Anthropic (Claude) | 4 | console.anthropic.com |
-| Google AI (Gemini) | 5 | Google Cloud Console → Vertex AI o AI Studio |
+| Last.fm | 4 | last.fm/api/account/create |
+| Google AI (Gemini) | 5 | aistudio.google.com → Get API Key |
 | ElevenLabs | 5 | elevenlabs.io → Profile → API Key |
-| Spotify (opcional) | 5 | developer.spotify.com → crear app |
 
 ---
 

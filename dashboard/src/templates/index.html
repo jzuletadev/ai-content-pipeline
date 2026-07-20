@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>Content Factory — Dashboard</title>
+    <style>
+        body { font-family: system-ui, sans-serif; background: #111; color: #eee; margin: 0; padding: 24px; }
+        h1 { font-size: 20px; margin-bottom: 16px; }
+        .tabs { margin-bottom: 20px; }
+        .tabs a { color: #888; text-decoration: none; margin-right: 16px; padding-bottom: 4px; }
+        .tabs a.active { color: #fff; border-bottom: 2px solid #4f9; }
+        .video-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px; }
+        .card { background: #1c1c1c; border-radius: 8px; padding: 16px; text-decoration: none; color: inherit; display: block; }
+        .card:hover { background: #242424; }
+        .card h3 { margin: 0 0 8px; font-size: 15px; }
+        .card .meta { color: #888; font-size: 13px; }
+        .empty { color: #666; padding: 40px 0; text-align: center; }
+    </style>
+</head>
+<body>
+    <h1>Content Factory</h1>
+    <div class="tabs">
+        <a href="/?status=review" class="{{ 'active' if current_status == 'review' else '' }}">Revisión</a>
+        <a href="/?status=approved" class="{{ 'active' if current_status == 'approved' else '' }}">Aprobados</a>
+        <a href="/?status=rejected" class="{{ 'active' if current_status == 'rejected' else '' }}">Rechazados</a>
+        <a href="/?status=published" class="{{ 'active' if current_status == 'published' else '' }}">Publicados</a>
+    </div>
+
+    {% if videos %}
+    <div class="video-list">
+        {% for v in videos %}
+        <a class="card" href="/videos/{{ v.id }}">
+            <h3>{{ v.metadata.title if v.metadata and v.metadata.title else 'Sin título' }}</h3>
+            <div class="meta">{{ v.channel_name or '—' }} · {{ v.created_at.strftime('%d/%m %H:%M') }}</div>
+        </a>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty">No hay videos en este estado.</div>
+    {% endif %}
+</body>
+</html>

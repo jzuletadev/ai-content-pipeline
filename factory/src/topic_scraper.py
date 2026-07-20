@@ -132,6 +132,7 @@ def _scrape_history_topics(channel_id: int):
         resp = requests.get(
             f"https://es.wikipedia.org/api/rest_v1/feed/onthisday/events/{today.month}/{today.day}",
             timeout=10,
+            headers={"User-Agent": "content-factory/1.0 (proyecto personal, uso educativo)"},
         )
         resp.raise_for_status()
         events = resp.json().get("events", [])

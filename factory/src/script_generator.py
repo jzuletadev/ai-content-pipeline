@@ -4,21 +4,40 @@ import os
 import re
 import requests
 import anthropic
+from rq import Retry
 from .db import get_conn
+from .queue import get_video_queue
+from .jobs import process_video
 
 logger = logging.getLogger(__name__)
 
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
 FPS = 30
+LYRIC_DURATION_SEC = int(os.environ.get("LYRIC_DURATION_SEC", "30"))
+HISTORY_DURATION_SEC = int(os.environ.get("HISTORY_DURATION_SEC", "60"))
+
+# Fase de pruebas: 1 solo video en curso a la vez en todo el sistema, para no
+# disparar gasto de tokens (guion + QC de imágenes) en lotes. Desactivar
+# (env TEST_MODE_SINGLE_VIDEO=false) cuando se valide el pipeline y se pase a
+# producción real.
+TEST_MODE_SINGLE_VIDEO = os.environ.get("TEST_MODE_SINGLE_VIDEO", "true").lower() == "true"
+
+IN_PROGRESS_STATUSES = ("scripting", "generating_assets", "rendering")
 
 # ─── Entry point ─────────────────────────────────────────────────────────────
 
 def run():
     logger.info("script_generator: start")
+
+    if TEST_MODE_SINGLE_VIDEO and _has_video_in_progress():
+        logger.info("Ya hay un video en curso — fase de pruebas (1 a la vez), se omite esta corrida")
+        return
+
     channels = _load_active_channels()
 
     for ch in channels:
-        pending = _load_pending_topics(ch["id"], limit=3)
+        limit = 1 if TEST_MODE_SINGLE_VIDEO else 3
+        pending = _load_pending_topics(ch["id"], limit=limit)
         logger.info(f"Canal '{ch['name']}': {len(pending)} temas pendientes")
 
         for topic in pending:
@@ -28,6 +47,10 @@ def run():
                 logger.error(f"Error procesando topic {topic['id']}: {e}")
                 _mark_topic(topic["id"], "discarded")
                 _reset_scripting_video(topic["id"])
+
+            if TEST_MODE_SINGLE_VIDEO:
+                logger.info("script_generator: done (1 video creado, fase de pruebas)")
+                return
 
     logger.info("script_generator: done")
 
@@ -49,7 +72,12 @@ def _process_topic(topic: dict, channel: dict):
         raise ValueError(f"Sin generador para nicho: {niche}")
 
     _save_video_script(video_id, script, metadata)
-    logger.info(f"  Video {video_id} → generating_assets")
+    get_video_queue().enqueue(
+        process_video, video_id,
+        job_timeout=1200,
+        retry=Retry(max=2, interval=[30, 120]),
+    )
+    logger.info(f"  Video {video_id} → generating_assets (encolado)")
 
 
 # ─── Lyric Videos ────────────────────────────────────────────────────────────
@@ -68,18 +96,20 @@ def _generate_lyric_script(topic: dict, channel: dict) -> tuple[dict, dict]:
     lyrics = lyrics[:3000]
     lyrics_inline = " | ".join(line for line in lyrics.split("\n") if line.strip())
 
-    bpm, duration_sec = _fetch_spotify_features(topic["source_ref"])
+    total_frames = LYRIC_DURATION_SEC * FPS
 
-    prompt = f"""Eres el productor creativo de un canal de lyric videos en español.
+    prompt = f"""Eres el productor creativo de un canal de lyric videos cortos (estilo Shorts/Reels/TikTok) en español.
 
 Canción: {song_title}
 Artista: {artist}
-BPM: {bpm}
-Duración: {duration_sec} segundos
-FPS del video: {FPS}
+Formato: CORTO — duración fija de {LYRIC_DURATION_SEC} segundos ({total_frames} frames a {FPS}fps)
 
-Letra (separadores | indican salto de línea):
+Letra completa (separadores | indican salto de línea):
 {lyrics_inline}
+
+Tu tarea: de toda la letra, elegí SOLO el fragmento más pegadizo y reconocible —
+normalmente el estribillo/coro. NO uses la canción completa. El video final dura
+exactamente {LYRIC_DURATION_SEC} segundos.
 
 Generá un JSON con esta estructura exacta:
 {{
@@ -88,7 +118,7 @@ Generá un JSON con esta estructura exacta:
       "text": "líneas de letra de esta escena (2-4 líneas)",
       "start_frame": 0,
       "end_frame": 90,
-      "image_prompt": "prompt en inglés para generar imagen de fondo con Gemini (describe escena visual)",
+      "image_prompts": ["prompt A en inglés", "prompt B en inglés"],
       "animation": "fade_in"
     }}
   ],
@@ -99,16 +129,36 @@ Generá un JSON con esta estructura exacta:
     "mood": "descripción del mood visual general"
   }},
   "metadata": {{
-    "title": "título para YouTube max 100 chars",
-    "description": "descripción 2-3 párrafos SEO en español",
-    "hashtags": ["#hashtag1", "#hashtag2"],
+    "title": "título para YouTube Shorts/TikTok max 100 chars",
+    "description": "descripción corta SEO en español",
+    "hashtags": ["#hashtag1", "#hashtag2", "#shorts"],
     "audio_ref": "{song_title} - {artist}"
   }}
 }}
 
 Reglas:
-- Repartí la letra en escenas de 2-4 líneas. Calculá start_frame/end_frame según la duración total ({int(duration_sec * FPS)} frames totales).
-- image_prompt debe describir una escena visual que evoque el mood de esa parte de la letra. En inglés.
+- El total de frames de todas las escenas DEBE sumar exactamente {total_frames} (de 0 a {total_frames}).
+- 2 a 3 escenas, cada una 2-4 líneas del fragmento elegido (cada escena se
+  parte en 2 imágenes al renderizar, así que pocas escenas ya dan suficiente
+  variedad visual sin disparar el costo de generación/QC).
+- image_prompts es SIEMPRE un array de EXACTAMENTE 2 strings en inglés — dos
+  momentos o ángulos DISTINTOS dentro de esa escena (nunca la misma imagen
+  repetida ni una simple variación mínima).
+- Cada image_prompt DEBE empezar literalmente con "modern disney style, " —
+  es el trigger word del modelo de imagen fine-tuneado que usamos (entrenado
+  para ese estilo animado específico). Sin ese prefijo el modelo cae de
+  nuevo en fotorrealismo. NUNCA fotorrealista ni cinematográfico.
+- Composición SIMPLE y no saturada: UN sujeto/acción central claro por
+  imagen, fondo simple que apoye sin competir. Nada de escenas con muchos
+  elementos o personajes compitiendo por atención — es la causa más común de
+  imágenes rotas.
+- Descripción PRECISA y concreta (sujeto + acción + escenario específico).
+  Nunca vaga, simbólica o abstracta — una descripción vaga hace que el modelo
+  de imagen improvise y genere algo que no tiene relación clara con la letra.
+- PROHIBIDO que la imagen incluya texto, letras, palabras, carteles o
+  escritura de cualquier tipo — el modelo no puede renderizar texto legible y
+  es otra fuente frecuente de errores.
+- Debe evocar el mood de esa parte de la letra.
 - animation debe ser uno de: fade_in, slide_up, typewriter, zoom_in
 - Respondé SOLO con el JSON. Sin texto adicional, sin markdown."""
 
@@ -136,26 +186,27 @@ def _fetch_lyrics(artist: str, title: str) -> str | None:
     return None
 
 
-def _fetch_spotify_features(source_ref: str) -> tuple[float, float]:
-    # BPM y duración exactos se integran en Fase 5 (audio analysis).
-    # Por ahora: defaults por género. El timing visual se ajusta con el audio real al subir.
-    return 120.0, 210.0  # bpm, duration_sec
-
-
 # ─── Historias Históricas ─────────────────────────────────────────────────────
 
 def _generate_history_script(topic: dict, channel: dict) -> tuple[dict, dict]:
     prompt = f"""Eres el guionista de un canal de historias históricas narradas con IA en español.
 
+Formato: CORTO — duración fija de {HISTORY_DURATION_SEC} segundos (estilo Shorts/Reels/TikTok).
+
 Tema del video: {topic['title']}
+
+Armá un arco narrativo completo en {HISTORY_DURATION_SEC}s: gancho (primeros ~5s) que
+enganche de entrada, desarrollo con contexto y tensión, y remate/cierre con el dato
+o giro más impactante. No trates de cubrir todo el tema — un ángulo concreto con
+principio, desarrollo y final.
 
 Generá un JSON con esta estructura exacta:
 {{
   "scenes": [
     {{
-      "narration": "texto narrado de esta escena (2-4 oraciones impactantes)",
-      "duration_sec": 8,
-      "image_prompt": "prompt en inglés para generar imagen histórica con Gemini",
+      "narration": "texto narrado de esta escena (1-3 oraciones)",
+      "duration_sec": 12,
+      "image_prompts": ["prompt A en inglés", "prompt B en inglés"],
       "text_overlay": "fecha o dato clave opcional (puede ser null)"
     }}
   ],
@@ -164,15 +215,36 @@ Generá un JSON con esta estructura exacta:
     "pace": "moderado"
   }},
   "metadata": {{
-    "title": "título impactante para YouTube max 100 chars",
-    "description": "descripción con contexto histórico SEO en español (2-3 párrafos)",
-    "hashtags": ["#hashtag1", "#hashtag2"]
+    "title": "título impactante para YouTube Shorts max 100 chars",
+    "description": "descripción corta con contexto histórico SEO en español",
+    "hashtags": ["#hashtag1", "#hashtag2", "#shorts"]
   }}
 }}
 
 Reglas:
-- 8 a 12 escenas. Cada una ~6-10 segundos de narración.
-- image_prompt debe ser detallado, estilo épico/cinematográfico, en inglés.
+- La suma de todos los "duration_sec" DEBE ser exactamente {HISTORY_DURATION_SEC} segundos.
+- 4 a 5 escenas (~10-15s cada una: gancho, desarrollo, remate) — cada escena
+  se parte en 2 imágenes al renderizar, así que pocas escenas narrativas ya
+  dan suficiente variedad visual (~7-8 imágenes en total) sin disparar el
+  costo de generación/QC de más escenas.
+- image_prompts es SIEMPRE un array de EXACTAMENTE 2 strings en inglés — dos
+  momentos o ángulos DISTINTOS dentro de esa escena (nunca la misma imagen
+  repetida ni una simple variación mínima).
+- Cada image_prompt DEBE empezar literalmente con "modern disney style, " —
+  es el trigger word del modelo de imagen fine-tuneado que usamos (entrenado
+  para ese estilo animado específico). Sin ese prefijo el modelo cae de
+  nuevo en fotorrealismo. NUNCA fotorrealista ni cinematográfico.
+- Composición SIMPLE y no saturada: UN sujeto/acción central claro por
+  imagen, fondo simple que apoye sin competir. Nada de escenas con muchos
+  elementos o personajes compitiendo por atención — es la causa más común de
+  imágenes rotas.
+- Descripción PRECISA y concreta (sujeto + acción + escenario específico,
+  época/vestimenta si aplica). Nunca vaga, simbólica o abstracta — una
+  descripción vaga hace que el modelo de imagen improvise y genere algo sin
+  relación clara con la escena histórica.
+- PROHIBIDO que la imagen incluya texto, letras, palabras, carteles o
+  escritura de cualquier tipo — el modelo no puede renderizar texto legible y
+  es otra fuente frecuente de errores.
 - Respondé SOLO con el JSON. Sin texto adicional, sin markdown."""
 
     return _call_claude(prompt)
@@ -216,6 +288,16 @@ def _call_claude(prompt: str) -> tuple[dict, dict]:
 
 
 # ─── DB helpers ──────────────────────────────────────────────────────────────
+
+def _has_video_in_progress() -> bool:
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT 1 FROM videos WHERE status = ANY(%s) LIMIT 1",
+            (list(IN_PROGRESS_STATUSES),),
+        )
+        return cur.fetchone() is not None
+
 
 def _load_active_channels() -> list[dict]:
     with get_conn() as conn:

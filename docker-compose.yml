@@ -52,57 +52,86 @@ services:
       - ./radar:/app
     command: python -m src.scheduler
 
-  # ── Sistema B: Fábrica de contenido ──
-  # factory-worker: descomentar en Fase 5 (assets + render con RQ)
-  # factory-worker:
-  #   build: ./factory
-  #   restart: unless-stopped
-  #   env_file: .env
-  #   environment:
-  #     DATABASE_URL: postgresql://factory:${POSTGRES_PASSWORD}@postgres:5432/content_factory
-  #     REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
-  #   depends_on:
-  #     postgres: { condition: service_healthy }
-  #     redis:    { condition: service_healthy }
-  #   volumes:
-  #     - ./factory:/app
-  #     - media:/data
-  #   command: rq worker video_jobs
+  # ── Generación de imágenes (self-hosted, GPU local) ──
+  imagegen:
+    build: ./imagegen
+    restart: unless-stopped
+    volumes:
+      - ./imagegen:/app
+    ports:
+      - "127.0.0.1:7860:7860"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:7860/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 120s   # tiempo de sobra para cargar el modelo en GPU
 
-  factory-scheduler:
+  # ── Sistema B: Fábrica de contenido ──
+  factory-worker:
     build: ./factory
     restart: unless-stopped
+    init: true   # tini como PID 1: cosecha zombies de Chromium/ffmpeg que deja Remotion
     env_file: .env
     environment:
       DATABASE_URL: postgresql://factory:${POSTGRES_PASSWORD}@postgres:5432/content_factory
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      IMAGEGEN_URL: http://imagegen:7860
+    depends_on:
+      postgres:  { condition: service_healthy }
+      redis:     { condition: service_healthy }
+      imagegen:  { condition: service_healthy }
+    volumes:
+      - ./factory:/app
+      - factory_node_modules:/app/remotion/node_modules
+      - media:/data
+    command: python3 -m src.worker
+
+  factory-scheduler:
+    build: ./factory
+    restart: unless-stopped
+    init: true
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://factory:${POSTGRES_PASSWORD}@postgres:5432/content_factory
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      IMAGEGEN_URL: http://imagegen:7860
     depends_on:
       postgres: { condition: service_healthy }
       redis:    { condition: service_healthy }
     volumes:
       - ./factory:/app
-    command: python -m src.scheduler
+      - factory_node_modules:/app/remotion/node_modules
+      - media:/data
+    command: python3 -m src.scheduler
 
   # ── Dashboard de revisión ──
-  # Descomentar cuando exista dashboard/Dockerfile (Fase 6)
-  # dashboard:
-  #   build: ./dashboard
-  #   restart: unless-stopped
-  #   env_file: .env
-  #   environment:
-  #     DATABASE_URL: postgresql://factory:${POSTGRES_PASSWORD}@postgres:5432/content_factory
-  #   depends_on:
-  #     postgres: { condition: service_healthy }
-  #   volumes:
-  #     - ./dashboard:/app
-  #     - media:/data
-  #   ports:
-  #     - "127.0.0.1:8080:8080"
-  #   command: uvicorn dashboard.main:app --host 0.0.0.0 --port 8080
+  dashboard:
+    build: ./dashboard
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://factory:${POSTGRES_PASSWORD}@postgres:5432/content_factory
+    depends_on:
+      postgres: { condition: service_healthy }
+    volumes:
+      - ./dashboard:/app
+      - media:/data:ro
+    ports:
+      - "127.0.0.1:8080:8080"
+    command: uvicorn src.main:app --host 0.0.0.0 --port 8080
 
 volumes:
   pgdata:
   redisdata:
+  factory_node_modules:   # protege node_modules del bind mount de ./factory:/app
   media:
     driver: local
     # Para apuntar a una ruta específica de tu disco (ej. un disco grande):
